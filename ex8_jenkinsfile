@@ -1,0 +1,131 @@
+
+podTemplate(yaml: '''
+    apiVersion: v1
+    kind: Pod
+    spec:
+      containers:
+      - name: gradle
+        image: gradle:jdk8
+        command:
+        - sleep
+        args:
+        - 99d
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /mnt
+
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:debug
+        command:
+        - sleep
+        args:
+        - 9999999
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /mnt
+        - name: kaniko-secret
+          mountPath: /kaniko/.docker
+
+      restartPolicy: Never
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: week7-dind
+      - name: kaniko-secret
+        secret:
+            secretName: dockercred
+            items:
+            - key: .dockerconfigjson
+              path: config.json
+''') {
+
+
+node(POD_LABEL) {
+
+  stage('gradle build and tests') {
+    git 'https://github.com/nosleep77/cd-docker-jenkins'
+
+    container('gradle') {
+
+    // build the calculator jar with divide command
+    stage('build gradle project') {
+
+        sh '''
+        cd $WORKSPACE/Chapter09/sample1
+        chmod +x gradlew
+        ./gradlew build
+        mv ./build/libs/calculator-0.0.1-SNAPSHOT.jar /mnt
+        '''
+    }
+   }
+  }
+
+  // build the container image
+  stage('build and push container image') {
+    container('kaniko') {
+
+    stage('build and upload container image') {
+        sh '''
+        echo 'FROM openjdk:8-jre' > Dockerfile
+        echo 'COPY ./calculator-0.0.1-SNAPSHOT.jar app.jar' >> Dockerfile
+        echo 'ENTRYPOINT ["java", "-jar", "app.jar"]' >> Dockerfile
+        mv /mnt/calculator-0.0.1-SNAPSHOT.jar .
+        /kaniko/executor --context `pwd` --destination johnt035/divcalc:3
+        '''
+        }
+
+     }
+    }
+
+
+  stage('deploy container image to k8s deployment') {
+    container('gradle') {
+
+    stage('update image') {
+	sh '''
+        cd $WORKSPACE/Chapter08/sample1
+
+	curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x ./kubectl
+
+	## deploy hazelcast and calculator 
+        ./kubectl apply -f hazelcast.yaml
+        ./kubectl apply -f calculator.yaml
+
+	## use dlambrig/week8:1.1 as suggested
+	./kubectl set image deployment/calculator-deployment calculator=dlambrig/week8:1.1 -n jenkins
+	sleep 5
+
+        '''
+        }
+
+
+    stage('test calc div') {
+	sh '''
+
+	## sum
+	test $(curl -s calculator-service:8080/sum?a=6\\&b=2) -eq 8 && echo 'pass' || echo 'fail'
+	test $(curl -s calculator-service:8080/sum?a=6\\&b=2) -eq 7 && echo 'pass' || echo 'fail'
+
+	## division
+	test $(curl -s calculator-service:8080/div?a=6\\&b=2) -eq 3 && echo 'pass' || echo 'fail'
+	test $(curl -s calculator-service:8080/div?a=6\\&b=2) -eq 4 && echo 'pass' || echo 'fail'
+
+	## division by zero
+	test $(curl -s calculator-service:8080/div?a=6\\&b=0) -eq 3 && echo 'pass' || echo 'fail'
+
+	#curl calculator-service:8080/sum?a=6\\&b=2
+	#curl calculator-service:8080/div?a=6\\&b=2
+	curl -s calculator-service:8080/div?a=6\\&b=0
+
+	'''
+
+	}
+       }
+     }
+
+
+
+}
+}
+
